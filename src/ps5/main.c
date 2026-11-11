@@ -4,6 +4,11 @@
  */
 #include "../core/app.h"
 #include "../core/webui.h"
+#include "../core/native_protocol.h"
+#include <sys/socket.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,6 +49,7 @@ static int game_title(char title[64])
     if (sceSystemServiceGetAppTitleId(id, raw)) return -1;
     /* Do not misclassify system apps or a partial response as a game. */
     raw[sizeof(raw) - 1] = 0;
+    if (!strcmp(raw, GA_NATIVE_TITLE_ID)) return 1; /* keep the profile while our own UI is open */
     if (strlen(raw) != 9 || (strncmp(raw, "PPSA", 4) && strncmp(raw, "CUSA", 4))) return -1;
     for (int i = 4; i < 9; i++) if (raw[i] < '0' || raw[i] > '9') return -1;
     snprintf(title, 64, "%s", raw);
@@ -55,10 +61,26 @@ int main(void)
     static ga_webui web;
     ga_app_init(&app, "/data/gyroaim/profiles", "ps5", 0);
     app.notify = notify;
+    struct ifaddrs *addresses = NULL;
+    if (!getifaddrs(&addresses)) {
+        for (struct ifaddrs *p = addresses; p; p = p->ifa_next) {
+            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+            struct sockaddr_in *addr = (struct sockaddr_in *)p->ifa_addr;
+            if ((ntohl(addr->sin_addr.s_addr) >> 24) == 127 || !addr->sin_addr.s_addr) continue;
+            char ip[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip))) {
+                snprintf(app.panel_url, sizeof(app.panel_url), "http://%s:8090", ip);
+                break;
+            }
+        }
+        freeifaddrs(addresses);
+    }
     int r = ga_webui_start(&web, 8090);
     if (r) { notify("Gyro Aim: porta 8090 indisponivel. Painel nao iniciado."); return 1; }
     signal(SIGINT, stop); signal(SIGTERM, stop); signal(SIGPIPE, SIG_IGN);
-    notify("Gyro Aim: painel em http://IP-DO-PS5:8090. Modo de configuracao; sem hook de entrada.");
+    char startup[256];
+    snprintf(startup, sizeof(startup), "Gyro Aim: servico ativo. Painel: %s. Entrada nos jogos ainda indisponivel.", app.panel_url);
+    notify(startup);
     double scan = 0;
     char candidate[64] = "", title[64];
     int stable = 0, failures = 0;
@@ -66,15 +88,16 @@ int main(void)
         double now = now_s();
         if (now - scan >= .5) {
             scan = now;
-            if (!game_title(title)) {
+            int result = game_title(title);
+            if (result == 0) {
                 failures = 0;
                 if (!strcmp(candidate, title)) stable++;
                 else { snprintf(candidate, sizeof(candidate), "%s", title); stable = 1; }
                 if (stable >= 2) ga_app_set_title(&app, candidate);
-            } else {
+            } else if (result < 0) {
                 stable = 0;
                 if (++failures >= 4) ga_app_set_title(&app, "default");
-            }
+            } else { stable = failures = 0; }
         }
         ga_webui_poll(&web, &app);
         usleep(2000);

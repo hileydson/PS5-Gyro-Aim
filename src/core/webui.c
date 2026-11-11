@@ -1,5 +1,6 @@
 #include "webui.h"
 #include "profile.h"
+#include "native_protocol.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -139,7 +140,12 @@ static void handle(ga_http_client *c, ga_app *a, char *body)
     if (sscanf(c->request, "%7s %127s %15s", method, path, version) != 3 || strcmp(version, "HTTP/1.1")) {
         error(c, 400, "Requisição inválida."); return;
     }
+    int native = !strncmp(path, "/api/native", 11);
     if (!strcmp(method, "GET")) {
+        if (!strcmp(path, "/api/native")) {
+            ga_native_snapshot snapshot; ga_native_snapshot_build(a, &snapshot);
+            respond(c, 200, "application/octet-stream", (const char *)&snapshot, sizeof(snapshot)); return;
+        }
         if (!strcmp(path, "/") || !strcmp(path, "/compact"))
             respond(c, 200, "text/html; charset=utf-8", GA_WEBUI_PAGE, strlen(GA_WEBUI_PAGE));
         else if (!strcmp(path, "/practice"))
@@ -169,7 +175,7 @@ static void handle(ga_http_client *c, ga_app *a, char *body)
         error(c, 409, "O jogo ou os ajustes mudaram. Confira o perfil e tente novamente."); return;
     }
     int r = -1;
-    if (!strcmp(path, "/api/set")) {
+    if ((!strcmp(path, "/api/set") || !strcmp(path, "/api/native/set"))) {
         ga_config next = a->cfg; int count = 0; r = 0;
         for (int i = 0; i < n; i++) {
             if (!strcmp(ps[i].key, "title") || !strcmp(ps[i].key, "revision")) continue;
@@ -177,11 +183,12 @@ static void handle(ga_http_client *c, ga_app *a, char *body)
             if (ga_config_set(&next, ps[i].key, ps[i].value)) r = -1;
         }
         if (!r) r = count ? ga_app_commit(a, &next) : -1;
-    } else if (!strcmp(path, "/api/action") && n == 3) {
+    } else if ((!strcmp(path, "/api/action") || !strcmp(path, "/api/native/action")) && n == 3) {
         char *action = value(ps, n, "action");
         if (action) r = ga_app_action(a, action);
-    } else if (!strcmp(path, "/api/save_default") && n == 2) r = ga_app_save_as_default(a);
-    else if (!strcmp(path, "/api/title") && a->simulated && n >= 3 && n <= 5) {
+    } else if ((!strcmp(path, "/api/save_default") || !strcmp(path, "/api/native/save_default")) && n == 2) r = ga_app_save_as_default(a);
+    else if ((!strcmp(path, "/api/title") || !strcmp(path, "/api/native/title")) &&
+             (a->simulated || (native && !a->output_ready)) && n >= 3 && n <= 5) {
         char *next_title = value(ps, n, "next_title"), safe[64];
         ga_title_sanitize(next_title, safe, sizeof(safe));
         char *name = value(ps, n, "next_name"), *source = value(ps, n, "source");
@@ -207,7 +214,10 @@ static void handle(ga_http_client *c, ga_app *a, char *body)
         }
     }
     if (r) error(c, r == -2 ? 503 : 400, r == -2 ? "Falha ao salvar. Ajuste anterior mantido." : "Ação ou valor inválido.");
-    else {
+    else if (native) {
+        ga_native_snapshot snapshot; ga_native_snapshot_build(a, &snapshot);
+        respond(c, 200, "application/octet-stream", (const char *)&snapshot, sizeof(snapshot));
+    } else {
         size_t len = ga_app_state_json(a, json, sizeof(json));
         respond(c, 200, "application/json; charset=utf-8", json, len);
     }

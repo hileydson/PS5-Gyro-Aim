@@ -10,7 +10,7 @@ typedef struct {
     ga_output out;
     ga_input last_in;
     char title[64], profile_dir[256], platform[16];
-    char title_name[128], title_source[24];
+    char title_name[128], title_source[24], panel_url[128];
     int remote_play; /* controle virtual destinado ao Chiaki; não implica sessão conectada */
     int title_has_profile, simulated;
     char message[256];

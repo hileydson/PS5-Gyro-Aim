@@ -1,65 +1,137 @@
-# Estado da integração PS5
+# Aplicativo homebrew nativo do PS5
 
-O projeto oferece um caminho de entrada via PC + Chiaki/Remote Play, descrito em
-[REMOTE_PLAY.md](REMOTE_PLAY.md). Ele evita injeção de código nos jogos e mudanças
-na Central de Controle. O console não precisa executar código deste projeto para
-o modo manual ou para a descoberta de título pela rede, quando ela estiver disponível.
+O alvo do projeto é instalar **Gyro Aim no PS5**, com o DualSense conectado ao
+console. O Linux serve para compilar, exercitar o núcleo e testar a interface
+antes de o console estar disponível. Não há PC/Remote Play na arquitetura final.
 
-## Payload opcional de painel e identificação
+## O que foi construído
 
-`src/ps5/main.c` implementa um executável independente que:
+### Aplicativo de configuração
 
-- Consulta o jogo aberto a cada 500 ms com `sceSystemServiceGetAppIdOfRunningBigApp`
-  e `sceSystemServiceGetAppTitleId`, seguindo as assinaturas do
-  [exemplo Injector do etaHEN](https://github.com/etaHEN/etaHEN-Plugins/blob/6339554e4e3c92c0a655a37194c1152d6b82ad88/Plugin_samples/Injector/source/main.cpp).
-- Aceita Title IDs `PPSA`/`CUSA` seguidos de cinco números, após duas leituras estáveis.
-- Volta ao padrão se as consultas falharem de forma persistente.
-- Serve o painel na porta 8090, usando `/data/gyroaim/profiles`.
-- Envia notificações comuns via `sceKernelSendNotificationRequest`.
-- Fecha sockets ao receber SIGINT/SIGTERM.
+`src/native/main.c` contém a interface gráfica, compilada para o PS5 e também
+para o laboratório Linux. A build PS5 usa uma janela OpenGL nativa 1920×1080 e
+renderização da interface em 1280×720, com navegação por DualSense. Não é uma página
+web empacotada ou um executável Linux renomeado.
 
-Ele **não lê o DualSense nem altera a entrada dos jogos**. O estado do painel
-informa a ausência de sensor/saída. Para jogar com gyro, o fluxo Remote Play roda
-no PC. O iniciador pode consultar este payload como fonte de Title ID:
+A interface possui abas de mira, sensor/recuperação, perfis e ajuda. Ajustes são
+enviados ao serviço residente por localhost. O cliente não grava configurações
+em uma segunda pasta. O app exibe o endereço do painel do celular fornecido pelo
+serviço e informa quando a entrada nos jogos está indisponível.
+
+Fechar o app encerra somente a interface. Ainda não foi validado no PS5 se abrir
+ou alternar esse título preserva outro jogo em execução. O fluxo inicial é
+configurar o perfil no app e depois abrir o jogo. Para ajustes durante o jogo,
+o painel do celular é servido pelo console; atalhos e notificações dependerão
+da integração do backend de entrada. Não há overlay interativo.
+
+### Serviço residente do console
+
+`src/ps5/main.c` é empacotado como `.plugin` do etaHEN com ID `GYRO00001`. Ele:
+
+- Serve o painel e as APIs na porta 8090.
+- Mantém perfis em `/data/gyroaim/profiles`.
+- Consulta o Title ID com `sceSystemServiceGetAppIdOfRunningBigApp` e
+  `sceSystemServiceGetAppTitleId`, com duas leituras estáveis antes de trocar.
+- Ignora o Title ID do próprio app `PPSA94001` para permitir editar o último perfil.
+- Descobre seu IPv4 e o fornece ao app como endereço do painel.
+- Envia notificações comuns e fecha os sockets em SIGINT/SIGTERM.
+- Não altera o ShellUI, banco de aplicativos, kernel ou memória dos jogos.
+
+O serviço não lê/aplica gyro dentro de jogos nesta build. `input_ready` e
+`output_ready` não são marcados artificialmente como ativos.
+
+### Protocolo app ↔ serviço
+
+As rotas `/api/native`, `/api/native/set`, `/api/native/action` e
+`/api/native/title` e `/api/native/save_default` usam o mesmo estado e as mesmas operações do painel web.
+O snapshot binário local tem magic, versão, tamanho, revisão, configurações,
+perfil, mensagens e lista limitada de perfis. O cliente valida tamanho/versão,
+strings e valores antes de usar a resposta.
+
+Toda alteração exige Title ID e revisão atuais. Em conflito, a solicitação é
+recusada; em falha de gravação, os valores anteriores são mantidos. A seleção
+manual de perfil nativo é recusada quando o backend de saída informa que está
+ativo, para não trocar a configuração sob um jogo que esteja recebendo entrada.
+O servidor é para a rede local confiável, sem autenticação; não publique a porta
+na internet.
+
+## Compilar
 
 ```bash
-python3 tools/play_ps5.py --ps5-panel http://IP-DO-PS5:8090
-```
-
-Nesse modo abra o painel do **PC** no celular para ajustar a mira aplicada pelo
-virtual. Alterações no painel do PS5 são gravadas no console, em perfis separados.
-
-## Compilação
-
-Use o [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk):
-
-```bash
+make ps5-deps
 make ps5 PS5_PAYLOAD_SDK=/caminho/ps5-payload-sdk
 ```
 
-Resultado: `build/gyroaim-ps5-panel.elf`. Compilação cruzada realizada com SDK
-**v0.45** e LLVM **19.1.1**. É um payload ELF, **não** um `.plugin` etaHEN.
-O target não transmite o arquivo ao console e não instala inicialização automática.
-A execução depende de um carregador ELF compatível e das bibliotecas do firmware.
+O primeiro comando baixa apenas dependências públicas fixadas em
+`tools/ps5-native-lock.json`, verifica SHA-256 e extrai em `.deps/ps5-native`.
+O segundo gera:
 
-A compilação confirma resolução de símbolos e formato ELF; não confirma que essas
-APIs, notificações ou o ciclo de vida funcionem no firmware 13.60. Não foi executado
-no PS5 nesta implementação. A integração deve ser testada pelo caminho de carga
-já usado no console, começando somente por consulta de título e painel.
+```
+build/ps5/homebrew/PPSA94001/eboot.bin
+build/ps5/homebrew/PPSA94001/sce_module/libc.prx
+build/ps5/homebrew/PPSA94001/sce_sys/param.json
+build/ps5/homebrew/PPSA94001/sce_sys/icon0.png
+build/ps5/etaHEN/plugins/gyroaim-service.plugin
+build/ps5/manifest.json
+```
 
-## O que continua pendente no modo autônomo, sem PC
+`eboot.bin` é um contêiner FSELF nativo com metadados SCE. `libc.prx` é o runtime
+aberto gerado pelas ferramentas do ps5-app-sdk; não foi retirado de um jogo.
+O serviço contém o cabeçalho de plugin do etaHEN e um ELF de payload, que é um
+formato distinto do executável de aplicação.
 
-| Parte | Estado |
-|---|---|
-| Conversão gyro → analógico, perfis e painel | Implementada e testada no host |
-| Payload com servidor e consulta de título | Compilado; execução física pendente |
-| Receber entrada dentro dos jogos PS5 | Não implementado |
-| Hook seguro em `scePadReadState` e `scePadRead` | Não implementado/validado |
-| Cobrir chamadas de controle em módulos de cada jogo | Não implementado/validado |
-| Comunicação daemon ↔ hook, ciclo de suspensão/retorno | Não implementada |
-| Overlay sobre jogo / Central de Controle | Não implementado |
-| Compatibilidade universal no console | Não certificada |
+O build inspeciona os contêineres e sua integridade. Isso verifica a geração dos
+artefatos, não a aceitação pelo carregador do firmware 13.60. `manifest.json`
+registra explicitamente `tested_on_console=false` e `game_input_hook=false`.
 
-Um modo totalmente autônomo exigiria essas etapas e testes por firmware/jogo.
-Modificar o ShellUI não é necessário para o painel no celular, e não foi usado
-como atalho para oferecer uma aparência de integração pronta.
+## Instalação a validar no console
+
+A pasta de saída segue o formato homebrew documentado pelo
+[ps5-app-sdk](https://github.com/cybervisi0n/ps5-app-sdk) e o formato de
+[plugins do etaHEN](https://github.com/etaHEN/etaHEN-Plugins).
+
+1. Copiar a pasta `homebrew/PPSA94001` para o local de homebrew aceito pelo
+   carregador instalado, por exemplo `/data/homebrew/PPSA94001`.
+2. Registrar a pasta no carregador compatível, como ShadowMount+, para mostrar o
+   ícone **Gyro Aim** na tela inicial. Não executar o exemplo antigo de instalação
+   que escreve em `/system_ex`.
+3. Copiar `gyroaim-service.plugin` para `/data/etaHEN/plugins/` e iniciá-lo pela
+   Toolbox do etaHEN. A política de inicialização automática do plugin pertence
+   ao etaHEN já instalado.
+4. Abrir Gyro Aim e verificar conexão com o serviço, navegação e gravação do perfil.
+5. No celular, na mesma rede, abrir `http://IP-DO-PS5:8090`, mostrado na aba Ajuda.
+
+Esses passos são o roteiro de validação, não uma instalação já testada. Não foi
+alterado nem transmitido nada a um PS5 durante o desenvolvimento desta build.
+A compatibilidade do carregador e da versão concreta do etaHEN precisa ser
+confirmada no console disponível ao usuário.
+
+## Entrada nos jogos: etapa ainda necessária
+
+Ler o DualSense no app de configuração não altera o que outro processo recebe.
+O serviço precisa de uma integração de entrada do console que aplique a conversão
+nas leituras do jogo. Essa integração deve contemplar:
+
+- `scePadReadState` e `scePadRead`, inclusive buffers de amostras.
+- ABI PS4/PS5, unidade/eixos do sensor e timestamps reais.
+- Identificação de jogo, controle e usuário; não modificar ShellUI ou processos de sistema.
+- Configuração por perfil, supressão dos atalhos e notificações.
+- Suspensão, retorno, desconexão, encerramento e retirada segura do hook.
+- Jogos/engines com outras rotas de entrada e recusa explícita quando não suportados.
+
+Não foi adicionado um hook com offsets adivinhados ou carregamento automático em
+todos os jogos. A build atual não deve ser apresentada como gyro funcional nos
+jogos PS5. O objetivo permanece completar essa integração nativa, não substituí-la
+por Remote Play.
+
+## Verificação já possível no Linux
+
+```bash
+make test test-http test-native
+make native-lab
+```
+
+O mesmo cliente C da aplicação foi testado contra o serviço portátil real:
+listar perfis, gravar, alternar jogos, rejeitar revisão antiga, restaurar fábrica,
+desfazer e rejeitar snapshots incompatíveis. A interface pode ser renderizada
+com SDL em modo offscreen sem ler o controle físico.

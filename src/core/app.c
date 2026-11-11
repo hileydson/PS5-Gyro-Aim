@@ -17,6 +17,7 @@ void ga_app_init(ga_app *a, const char *dir, const char *platform, int simulated
     snprintf(a->profile_dir, sizeof(a->profile_dir), "%s", dir);
     snprintf(a->platform, sizeof(a->platform), "%s", platform);
     a->simulated = simulated;
+    snprintf(a->panel_url, sizeof(a->panel_url), "http://%s:8090", !strcmp(platform, "ps5") ? "IP-DO-PS5" : "IP-DO-PC");
     ga_app_set_title(a, GA_DEFAULT_PROFILE);
 }
 
@@ -242,7 +243,8 @@ static void json_str(char *dst, size_t n, const char *s)
 size_t ga_app_state_json(const ga_app *a, char *buf, size_t n)
 {
     if (!n) return 0;
-    char msg[512], title[128], platform[64], name[256], source[64];
+    char msg[512], title[128], platform[64], name[256], source[64], panel[256];
+    json_str(panel, sizeof(panel), a->panel_url);
     json_str(name, sizeof(name), a->title_name);
     json_str(source, sizeof(source), a->title_source);
     json_str(msg, sizeof(msg), a->message);
@@ -250,7 +252,7 @@ size_t ga_app_state_json(const ga_app *a, char *buf, size_t n)
     json_str(platform, sizeof(platform), a->platform);
     size_t len = (size_t)snprintf(buf, n,
         "{\"platform\":\"%s\",\"simulated\":%d,\"remote_play\":%d,\"title\":\"%s\",\"has_profile\":%d,"
-        "\"title_name\":\"%s\",\"title_source\":\"%s\",\"message\":\"%s\",\"message_seq\":%u,\"revision\":%u,"
+        "\"title_name\":\"%s\",\"title_source\":\"%s\",\"panel_url\":\"%s\",\"message\":\"%s\",\"message_seq\":%u,\"revision\":%u,"
         "\"input_ready\":%d,\"output_ready\":%d,\"paused\":%d,\"can_undo\":%d,\"testing\":%d,\"save_error\":%d,"
         "\"calibration\":{\"active\":%d,\"progress\":%.2f},"
         "\"config\":{\"enabled\":%d,\"activation\":\"%s\",\"toggle_mode\":%d,"
@@ -258,7 +260,7 @@ size_t ga_app_state_json(const ga_app *a, char *buf, size_t n)
         "\"smoothing\":%.2f,\"gyro_deadzone\":%.2f,\"invert_x\":%d,\"invert_y\":%d,"
         "\"hotkeys_enabled\":%d,\"bias_pitch\":%.4f,\"bias_yaw\":%.4f},"
         "\"live\":{\"active\":%d,\"rx\":%.3f,\"ry\":%.3f,\"pitch\":%.1f,\"yaw\":%.1f,\"buttons\":%u},\"buttons\":[",
-        platform, a->simulated, a->remote_play, title, a->title_has_profile, name, source, msg, a->message_seq, a->revision,
+        platform, a->simulated, a->remote_play, title, a->title_has_profile, name, source, panel, msg, a->message_seq, a->revision,
         a->input_ready, a->output_ready, a->paused, a->can_undo, a->testing, a->save_error,
         a->calibrating, fminf(a->calibration_time / 2, 1),
         a->cfg.enabled, ga_button_id(a->cfg.activation), a->cfg.toggle_mode,

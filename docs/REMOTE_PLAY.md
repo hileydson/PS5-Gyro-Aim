@@ -1,3 +1,8 @@
+> Experimento auxiliar de laboratório. O produto principal é o app homebrew
+> nativo instalado no PS5, sem PC/Chiaki/Remote Play durante o uso. Este documento
+> preserva a experiência anterior; não substitui a integração nativa descrita em
+> [PS5.md](PS5.md).
+
 # Jogar na TV e ajustar pelo celular
 
 O caminho com menor intervenção no console é usar a entrada do Remote Play:

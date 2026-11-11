@@ -1,0 +1,33 @@
+{
+  "app_sdk": {
+    "url": "https://codeload.github.com/cybervisi0n/ps5-app-sdk/tar.gz/aee48ec8ec587a92c4ca31fe66667894e03ea9a7",
+    "sha256": "f805a5c1ed195a59f77c4af5716e7f53fb6c0f971daca98e0015f42260844f11",
+    "revision": "aee48ec8ec587a92c4ca31fe66667894e03ea9a7"
+  },
+  "libraries": [
+    {
+      "name": "ps5-sdl2",
+      "tag": "v0.0.1",
+      "url": "https://github.com/cybervisi0n/ps5-sdl2/releases/download/v0.0.1/ps5-sdl2_release.zip",
+      "sha256": "3b279c596011d634b7c80a0bc5f26829274d2a554efb43e3b301bd468af1eace"
+    },
+    {
+      "name": "ps5-mesa",
+      "tag": "26.2.0-2",
+      "url": "https://github.com/cybervisi0n/ps5-mesa/releases/download/26.2.0-2/ps5-mesa_release.zip",
+      "sha256": "807cef6f4b20a1702bc9432d53eef0f3ec99052e78969d026551c34b195d92a0"
+    },
+    {
+      "name": "ps5-opengnm-psbc",
+      "tag": "v0.0.2",
+      "url": "https://github.com/cybervisi0n/ps5-opengnm-psbc/releases/download/v0.0.2/ps5-opengnm-psbc_release.zip",
+      "sha256": "5fbbde2910d88e9c899f0eca39122190ca4606f3effd290e96967f17a6f48a65"
+    },
+    {
+      "name": "ps5-gl-runtime",
+      "tag": "v0.0.1",
+      "url": "https://github.com/cybervisi0n/ps5-gl-runtime/releases/download/v0.0.1/ps5-gl-runtime_release.zip",
+      "sha256": "c5e7534607412507791005c5639e7e792a873c323e0cc2270073728b350244ac"
+    }
+  ]
+}

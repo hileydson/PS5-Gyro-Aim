@@ -2,3 +2,5 @@ build/
 profiles/
 __pycache__/
 *.pyc
+
+.deps/
