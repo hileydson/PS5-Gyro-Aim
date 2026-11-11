@@ -106,6 +106,10 @@ def main():
             response.read()
             fragmented.close()
             assert state()['config']['sensitivity'] == 4.1
+            assert post('/api/action', action='restore_defaults')[0] == 200
+            assert state()['config']['sensitivity'] == 1.5
+            assert post('/api/action', action='undo')[0] == 200
+            assert state()['config']['sensitivity'] == 4.1
             # Make the profile directory unwritable without relying on UID permissions.
             profile = Path(directory) / 'GAME_A.ini'
             profile.unlink()

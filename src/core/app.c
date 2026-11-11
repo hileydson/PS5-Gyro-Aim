@@ -123,6 +123,8 @@ int ga_app_action(ga_app *a, const char *action)
         next = a->undo_cfg;
     } else if (!strcmp(action, "use_default")) {
         ga_profile_load(a->profile_dir, GA_DEFAULT_PROFILE, &next);
+    } else if (!strcmp(action, "restore_defaults")) {
+        ga_config_default(&next);
     } else if (!strcmp(action, "preset_precision")) {
         next.sensitivity = 1; next.anti_deadzone = .1f;
         next.smoothing = .2f; next.vertical_ratio = .8f;
@@ -150,7 +152,10 @@ int ga_app_action(ga_app *a, const char *action)
     int r = ga_app_commit(a, &next);
     if (!r) {
         if (!strcmp(action, "revert_test")) a->testing = 0;
-        message(a, "Perfil atualizado e salvo. Teste a mira no jogo.");
+        if (!strcmp(action, "restore_defaults")) {
+            a->calibrating = 0;
+            message(a, "Padrões de fábrica restaurados neste perfil. Você pode desfazer o ajuste.");
+        } else message(a, "Perfil atualizado e salvo. Teste a mira no jogo.");
     }
     return r;
 }

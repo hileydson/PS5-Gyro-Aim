@@ -170,6 +170,11 @@ o ajuste anterior continua ativo e o painel mostra o erro. Desfazer e pontos de
 retorno não sobrevivem ao encerramento do aplicativo ou à troca de jogo.
 O progresso do assistente fica neste navegador, separado por Title ID.
 
+No final do painel completo e compacto, **Restaurar default deste perfil** recupera
+os valores de fábrica do aplicativo (incluindo calibração), salva somente o
+perfil aberto e permite desfazer. Para recuperar seu padrão personalizado, use
+**Copiar padrão para este jogo** no painel completo.
+
 O painel é um serviço para rede local confiável, sem autenticação. Não exponha a
 porta 8090 à internet. Não é necessário atualizar o console ou conectá-lo à PSN
 para testar o código local; a disponibilidade do pareamento Remote Play depende

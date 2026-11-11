@@ -232,6 +232,24 @@ static void test_testpoint_and_failures(void)
     ga_app_set_title(&a, "GAME_A");
     CHECK(ga_app_action(&a, "use_default") == 0 && NEAR(a.cfg.sensitivity, 3.2f));
 
+    /* Factory restore is per title and independent of a customized default.ini. */
+    CHECK(ga_app_set(&a, "bias_pitch", "0.8") == 0);
+    CHECK(ga_app_set(&a, "hotkeys_enabled", "0") == 0);
+    ga_app_set_connection(&a, 1, 1);
+    CHECK(ga_app_action(&a, "calibrate") == 0);
+    CHECK(ga_app_action(&a, "restore_defaults") == 0);
+    ga_config factory; ga_config_default(&factory);
+    CHECK(!a.calibrating && a.can_undo);
+    CHECK(NEAR(a.cfg.sensitivity, factory.sensitivity));
+    CHECK(NEAR(a.cfg.bias_pitch, 0) && a.cfg.hotkeys_enabled == factory.hotkeys_enabled);
+    CHECK(ga_profile_load(dir, "GAME_A", &reloaded) == 1);
+    CHECK(NEAR(reloaded.sensitivity, factory.sensitivity));
+    ga_profile_load(dir, "default", &reloaded);
+    CHECK(NEAR(reloaded.sensitivity, 3.2f));
+    CHECK(ga_profile_load(dir, "GAME_B", &reloaded) == 1 && NEAR(reloaded.sensitivity, 3.2f));
+    CHECK(ga_app_action(&a, "undo") == 0);
+    CHECK(NEAR(a.cfg.sensitivity, 3.2f) && NEAR(a.cfg.bias_pitch, .8f) && !a.cfg.hotkeys_enabled);
+
     /* A file in place of the profile directory reliably fails even when run as root. */
     char file[256]; snprintf(file, sizeof(file), "%s/not_a_directory", dir);
     FILE *f = fopen(file, "w"); CHECK(f != NULL); if (f) fclose(f);
@@ -240,7 +258,9 @@ static void test_testpoint_and_failures(void)
     CHECK(ga_app_set(&a, "sensitivity", "7") == -2);
     CHECK(NEAR(a.cfg.sensitivity, before) && a.save_error && a.revision == rev);
     CHECK(ga_app_save_as_default(&a) == -2);
-    a.cfg.enabled = 0; a.cfg.activation = GA_BTN_ALWAYS;
+    CHECK(ga_app_action(&a, "restore_defaults") == -2);
+    CHECK(NEAR(a.cfg.sensitivity, before));
+    a.cfg.enabled = 0; a.cfg.activation = GA_BTN_ALWAYS; a.cfg.hotkeys_enabled = 1;
     ga_input input = frame(0, 100, GA_BIT(GA_HOTKEY_MODIFIER) | GA_BIT(GA_BTN_TRIANGLE));
     ga_app_process(&a, &input);
     CHECK(!a.cfg.enabled && !a.out.gyro_active && NEAR(a.out.rx, 0));
