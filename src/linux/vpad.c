@@ -102,6 +102,17 @@ static int rescale(const struct input_absinfo *a, int value, int min, int max)
     return (int)(r < min ? min : r > max ? max : r);
 }
 
+void vpad_hotkeys(vpad *v, int block)
+{
+    if (v->fd < 0 || v->block_hotkeys == !!block) return;
+    v->block_hotkeys = !!block;
+    emit(v->fd, EV_KEY, BTN_Y, block ? 0 : v->face[0]);
+    emit(v->fd, EV_KEY, BTN_X, block ? 0 : v->face[1]);
+    emit(v->fd, EV_ABS, ABS_HAT0X, block ? 0 : v->hat[0]);
+    emit(v->fd, EV_ABS, ABS_HAT0Y, block ? 0 : v->hat[1]);
+    emit(v->fd, EV_SYN, SYN_REPORT, 0);
+}
+
 void vpad_forward(vpad *v, const struct input_event *ev, int block_hotkeys)
 {
     if (v->fd < 0) return;
@@ -125,7 +136,10 @@ void vpad_forward(vpad *v, const struct input_event *ev, int block_hotkeys)
             out = ev->code; break;
         default: return; /* L2/R2 digitais: os gatilhos analógicos já bastam */
         }
-        if (block_hotkeys && ev->code == BTN_NORTH && ev->value) return;
+        if (ev->code == BTN_NORTH || ev->code == BTN_WEST) {
+            v->face[ev->code == BTN_WEST] = !!ev->value;
+            if (block_hotkeys) return;
+        }
         emit(v->fd, EV_KEY, out, ev->value);
         return;
     }
@@ -143,7 +157,8 @@ void vpad_forward(vpad *v, const struct input_event *ev, int block_hotkeys)
             break;
         case ABS_HAT0X:
         case ABS_HAT0Y:
-            if (block_hotkeys && ev->value) return;
+            v->hat[ev->code == ABS_HAT0Y] = ev->value;
+            if (block_hotkeys) return;
             emit(v->fd, EV_ABS, ev->code, ev->value);
             break;
         default:

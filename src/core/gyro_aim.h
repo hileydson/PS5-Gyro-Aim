@@ -37,6 +37,8 @@ typedef struct {
     float     gyro_deadzone;  /* 0 .. 10 °/s (ignora tremor/ruído) */
     int       invert_x;
     int       invert_y;
+    int       hotkeys_enabled; /* pode desligar se o jogo usa clique do touchpad */
+    float     bias_pitch, bias_yaw; /* calibração do sensor em °/s */
 } ga_config;
 
 /* Entrada de um quadro. Convenção: pitch > 0 = controle inclinado para cima,
@@ -66,6 +68,7 @@ enum {
     GA_EVT_SENS    = 1 << 0,
     GA_EVT_ADZ     = 1 << 1,
     GA_EVT_ENABLED = 1 << 2,
+    GA_EVT_HELP    = 1 << 3,
 };
 
 void        ga_config_default(ga_config *cfg);

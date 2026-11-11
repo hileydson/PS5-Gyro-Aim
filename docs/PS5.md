@@ -1,44 +1,65 @@
-# Rodando no PS5 (firmware 13.60, Relapse + etaHEN)
+# Estado da integração PS5
 
-O núcleo (`src/core`) já é independente de plataforma: só usa C, `math.h` e sockets BSD.
-No PS5 falta escrever a camada `src/ps5/`, compilada com o
-[ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk).
+O projeto oferece um caminho de entrada via PC + Chiaki/Remote Play, descrito em
+[REMOTE_PLAY.md](REMOTE_PLAY.md). Ele evita injeção de código nos jogos e mudanças
+na Central de Controle. O console não precisa executar código deste projeto para
+o modo manual ou para a descoberta de título pela rede, quando ela estiver disponível.
 
-## Arquitetura planejada
+## Payload opcional de painel e identificação
 
+`src/ps5/main.c` implementa um executável independente que:
+
+- Consulta o jogo aberto a cada 500 ms com `sceSystemServiceGetAppIdOfRunningBigApp`
+  e `sceSystemServiceGetAppTitleId`, seguindo as assinaturas do
+  [exemplo Injector do etaHEN](https://github.com/etaHEN/etaHEN-Plugins/blob/6339554e4e3c92c0a655a37194c1152d6b82ad88/Plugin_samples/Injector/source/main.cpp).
+- Aceita Title IDs `PPSA`/`CUSA` seguidos de cinco números, após duas leituras estáveis.
+- Volta ao padrão se as consultas falharem de forma persistente.
+- Serve o painel na porta 8090, usando `/data/gyroaim/profiles`.
+- Envia notificações comuns via `sceKernelSendNotificationRequest`.
+- Fecha sockets ao receber SIGINT/SIGTERM.
+
+Ele **não lê o DualSense nem altera a entrada dos jogos**. O estado do painel
+informa a ausência de sensor/saída. Para jogar com gyro, o fluxo Remote Play roda
+no PC. O iniciador pode consultar este payload como fonte de Title ID:
+
+```bash
+python3 tools/play_ps5.py --ps5-panel http://IP-DO-PS5:8090
 ```
-┌───────────────────── daemon gyroaim.elf (payload) ─────────────────────┐
-│  • detecta o jogo em primeiro plano (title id) → ga_app_set_title()     │
-│  • servidor web na porta 8090 → mesma página dos sliders                │
-│  • guarda perfis em /data/gyroaim/profiles/<TITLE_ID>.ini               │
-│  • notificações na tela (sceKernelSendNotificationRequest)              │
-└──────────────┬──────────────────────────────────────────────────────────┘
-               │ injeta (ptrace) quando um jogo abre
-┌──────────────▼───── hook dentro do processo do jogo ────────────────────┐
-│  scePadReadState / scePadRead do jogo:                                  │
-│    1. chama a função original                                           │
-│    2. lê angularVelocity do mesmo estado (liga o sensor se preciso)     │
-│    3. ga_update() → escreve rightStick, remove botões de atalho         │
-│    4. devolve o estado modificado ao jogo                               │
-└─────────────────────────────────────────────────────────────────────────┘
+
+Nesse modo abra o painel do **PC** no celular para ajustar a mira aplicada pelo
+virtual. Alterações no painel do PS5 são gravadas no console, em perfis separados.
+
+## Compilação
+
+Use o [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk):
+
+```bash
+make ps5 PS5_PAYLOAD_SDK=/caminho/ps5-payload-sdk
 ```
 
-A config é passada do daemon para o hook por memória compartilhada ou socket local,
-então trocar de jogo ou mexer num slider vale na hora.
+Resultado: `build/gyroaim-ps5-panel.elf`. Compilação cruzada realizada com SDK
+**v0.45** e LLVM **19.1.1**. É um payload ELF, **não** um `.plugin` etaHEN.
+O target não transmite o arquivo ao console e não instala inicialização automática.
+A execução depende de um carregador ELF compatível e das bibliotecas do firmware.
 
-## Etapas e riscos
+A compilação confirma resolução de símbolos e formato ELF; não confirma que essas
+APIs, notificações ou o ciclo de vida funcionem no firmware 13.60. Não foi executado
+no PS5 nesta implementação. A integração deve ser testada pelo caminho de carga
+já usado no console, começando somente por consulta de título e painel.
 
-| Etapa | Situação |
+## O que continua pendente no modo autônomo, sem PC
+
+| Parte | Estado |
 |---|---|
-| Núcleo, perfis, página web | **pronto** e testado no Linux |
-| Daemon no PS5: web + perfis + notificação | viável, o SDK já tem exemplos de sockets e notificação |
-| Detectar o title id do jogo aberto | viável, mas a chamada exata do sistema precisa ser confirmada no console |
-| **Hook do controle dentro do jogo** | **parte mais difícil**: injetar código no processo do jogo e trocar a entrada de `scePadReadState` na tabela de imports. Ferramentas da cena já usam hooks de `scePad*`, mas precisamos validar no 13.60 |
-| Atalho na barra de menu (Central de Controle) | **não previsto por enquanto**: exigiria modificar o ShellUI do sistema, que é frágil e muda entre firmwares. Alternativas: atalhos no controle e a página web (dá para fixar no celular) |
+| Conversão gyro → analógico, perfis e painel | Implementada e testada no host |
+| Payload com servidor e consulta de título | Compilado; execução física pendente |
+| Receber entrada dentro dos jogos PS5 | Não implementado |
+| Hook seguro em `scePadReadState` e `scePadRead` | Não implementado/validado |
+| Cobrir chamadas de controle em módulos de cada jogo | Não implementado/validado |
+| Comunicação daemon ↔ hook, ciclo de suspensão/retorno | Não implementada |
+| Overlay sobre jogo / Central de Controle | Não implementado |
+| Compatibilidade universal no console | Não certificada |
 
-## Observações
-
-- Não use o console desbloqueado online na PSN. Em jogos online, alterar a entrada do
-  controle também pode ser tratado como trapaça.
-- Alguns jogos leem o controle por outras funções (`scePadRead` com buffer, engines com
-  módulos próprios). O hook vai precisar de ajustes por engine/jogo.
+Um modo totalmente autônomo exigiria essas etapas e testes por firmware/jogo.
+Modificar o ShellUI não é necessário para o painel no celular, e não foi usado
+como atalho para oferecer uma aparência de integração pronta.

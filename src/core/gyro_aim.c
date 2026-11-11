@@ -55,6 +55,8 @@ void ga_config_default(ga_config *cfg)
     cfg->gyro_deadzone  = 1.0f;
     cfg->invert_x       = 0;
     cfg->invert_y       = 0;
+    cfg->hotkeys_enabled = 1;
+    cfg->bias_pitch = cfg->bias_yaw = 0;
 }
 
 static float clampf(float v, float lo, float hi)
@@ -71,6 +73,9 @@ void ga_config_clamp(ga_config *cfg)
     cfg->toggle_mode    = cfg->toggle_mode ? 1 : 0;
     cfg->invert_x       = cfg->invert_x ? 1 : 0;
     cfg->invert_y       = cfg->invert_y ? 1 : 0;
+    cfg->hotkeys_enabled = !!cfg->hotkeys_enabled;
+    cfg->bias_pitch = clampf(cfg->bias_pitch, -20, 20);
+    cfg->bias_yaw = clampf(cfg->bias_yaw, -20, 20);
     cfg->sensitivity    = clampf(cfg->sensitivity, 0.1f, 10.0f);
     cfg->anti_deadzone  = clampf(cfg->anti_deadzone, 0.0f, 0.9f);
     cfg->vertical_ratio = clampf(cfg->vertical_ratio, 0.1f, 2.0f);
@@ -87,18 +92,20 @@ void ga_state_reset(ga_state *st)
 static int handle_hotkeys(ga_config *cfg, uint32_t pressed, uint32_t held, ga_output *out)
 {
     int evt = 0;
-    if (!(held & GA_BIT(GA_HOTKEY_MODIFIER)))
+    if (!cfg->hotkeys_enabled || !(held & GA_BIT(GA_HOTKEY_MODIFIER)))
         return 0;
 
     out->suppress |= GA_BIT(GA_HOTKEY_MODIFIER) | GA_BIT(GA_BTN_DPAD_UP) |
                      GA_BIT(GA_BTN_DPAD_DOWN) | GA_BIT(GA_BTN_DPAD_LEFT) |
-                     GA_BIT(GA_BTN_DPAD_RIGHT) | GA_BIT(GA_BTN_TRIANGLE);
+                     GA_BIT(GA_BTN_DPAD_RIGHT) | GA_BIT(GA_BTN_TRIANGLE) |
+                     GA_BIT(GA_BTN_SQUARE);
 
     if (pressed & GA_BIT(GA_BTN_DPAD_UP))    { cfg->sensitivity += 0.1f;   evt |= GA_EVT_SENS; }
     if (pressed & GA_BIT(GA_BTN_DPAD_DOWN))  { cfg->sensitivity -= 0.1f;   evt |= GA_EVT_SENS; }
     if (pressed & GA_BIT(GA_BTN_DPAD_RIGHT)) { cfg->anti_deadzone += 0.02f; evt |= GA_EVT_ADZ; }
     if (pressed & GA_BIT(GA_BTN_DPAD_LEFT))  { cfg->anti_deadzone -= 0.02f; evt |= GA_EVT_ADZ; }
     if (pressed & GA_BIT(GA_BTN_TRIANGLE))   { cfg->enabled = !cfg->enabled; evt |= GA_EVT_ENABLED; }
+    if (pressed & GA_BIT(GA_BTN_SQUARE)) evt |= GA_EVT_HELP;
 
     if (evt) {
         /* arredonda para não acumular erro de float (1.5000001) */
@@ -135,7 +142,10 @@ int ga_update(ga_config *cfg, ga_state *st, const ga_input *in, ga_output *out)
 
     float gx = 0.0f, gy = 0.0f;
     if (active) {
-        float yaw = in->yaw_dps, pitch = in->pitch_dps;
+        float yaw = isfinite(in->yaw_dps) ? in->yaw_dps - cfg->bias_yaw : 0;
+        float pitch = isfinite(in->pitch_dps) ? in->pitch_dps - cfg->bias_pitch : 0;
+        yaw = clampf(yaw, -4000, 4000);
+        pitch = clampf(pitch, -4000, 4000);
 
         /* deadzone do gyro (subtrativa, sem "degrau") */
         float mag = sqrtf(yaw * yaw + pitch * pitch);
@@ -177,8 +187,8 @@ int ga_update(ga_config *cfg, ga_state *st, const ga_input *in, ga_output *out)
     }
 
     /* soma com o analógico físico (o jogador ainda pode usar o stick) */
-    float rx = in->real_rx + gx;
-    float ry = in->real_ry + gy;
+    float rx = clampf(isfinite(in->real_rx) ? in->real_rx : 0, -1, 1) + gx;
+    float ry = clampf(isfinite(in->real_ry) ? in->real_ry : 0, -1, 1) + gy;
     float m = sqrtf(rx * rx + ry * ry);
     if (m > 1.0f) { rx /= m; ry /= m; }
 

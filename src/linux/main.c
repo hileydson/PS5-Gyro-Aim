@@ -39,6 +39,8 @@ static char g_vstatus[160] = "desligado";
 static struct termios g_old_tio;
 static int g_tio_saved = 0;
 
+static void log_notification(const char *msg) { fprintf(stderr, "%s\n", msg); }
+
 static void on_signal(int s) { (void)s; g_quit = 1; }
 
 static void term_restore(void)
@@ -210,23 +212,30 @@ static const char *SIM_TITLES[] = {"default", "PPSA00001", "PPSA00002", "PPSA000
 
 int main(int argc, char **argv)
 {
-    int port = 8090, use_virtual = 1, grab = 1;
-    const char *profile_dir = "profiles";
+    int port = 8090, use_virtual = 1, grab = 1, remote_play = 0, use_controller = 1;
+    const char *profile_dir = "profiles", *title = "default";
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = atoi(argv[++i]);
         else if (strcmp(argv[i], "--profiles") == 0 && i + 1 < argc) profile_dir = argv[++i];
+        else if (strcmp(argv[i], "--title") == 0 && i + 1 < argc) title = argv[++i];
         else if (strcmp(argv[i], "--no-virtual") == 0) use_virtual = 0;
         else if (strcmp(argv[i], "--no-grab") == 0) grab = 0;
+        else if (strcmp(argv[i], "--remote-play") == 0) remote_play = 1;
+        else if (strcmp(argv[i], "--no-controller") == 0) use_controller = 0;
         else {
-            fprintf(stderr, "uso: %s [--port 8090] [--profiles ./profiles] [--no-virtual] [--no-grab]\n", argv[0]);
+            fprintf(stderr, "uso: %s [--port 8090] [--profiles ./profiles] [--title JOGO] [--no-virtual] [--no-grab] [--no-controller] [--remote-play]\n", argv[0]);
             return 1;
         }
     }
 
     static ga_app app;
     ga_app_init(&app, profile_dir, "linux", 1);
+    ga_app_set_title(&app, title);
+    app.remote_play = remote_play;
+    int terminal_output = isatty(STDOUT_FILENO);
+    if (!terminal_output) app.notify = log_notification;
 
-    ga_webui web;
+    static ga_webui web;
     int werr = ga_webui_start(&web, port);
     if (werr != 0) {
         fprintf(stderr, "nao consegui abrir a porta %d: %s\n", port, strerror(-werr));
@@ -242,12 +251,14 @@ int main(int argc, char **argv)
     vpad vp = {.fd = -1};
     snprintf(g_vstatus, sizeof(g_vstatus), "%s", use_virtual ? "aguardando o controle" : "desligado (--no-virtual)");
     ga_input in = {0};
-    double last_scan = 0, last_draw = 0, last_frame = now_s();
+    double last_scan = 0, last_draw = 0, last_frame = now_s(), last_motion = 0;
     float gyro[3] = {0};
+    char previous_status[160] = "";
+    if (!terminal_output) fprintf(stderr, "Gyro Aim: http://localhost:%d · treino: /practice · perfil %s\n", port, app.title);
 
     while (!g_quit) {
         double t = now_s();
-        if (c.motion < 0 && t - last_scan > 2.0) {
+        if (use_controller && c.motion < 0 && t - last_scan > 2.0) {
             last_scan = t;
             if (ctl_find(&c) == 0 && use_virtual) {
                 int verr = vpad_open(&vp, c.pad);
@@ -255,6 +266,10 @@ int main(int argc, char **argv)
                     snprintf(g_vstatus, sizeof(g_vstatus), "ERRO ao criar (%s) - veja o README", strerror(-verr));
                 } else if (grab && ioctl(c.pad, EVIOCGRAB, 1) == 0) {
                     snprintf(g_vstatus, sizeof(g_vstatus), "ATIVO (DualSense real escondido dos apps evdev)");
+                } else if (remote_play && grab) {
+                    vpad_close(&vp);
+                    ctl_close(&c);
+                    snprintf(g_vstatus, sizeof(g_vstatus), "CONTROLE OCUPADO: encerre a outra sessao do Gyro Aim");
                 } else {
                     snprintf(g_vstatus, sizeof(g_vstatus), "ATIVO (DualSense real tambem visivel)");
                 }
@@ -263,7 +278,7 @@ int main(int argc, char **argv)
 
         struct pollfd fds[5];
         int nfd = 0;
-        fds[nfd++] = (struct pollfd){.fd = STDIN_FILENO, .events = POLLIN};
+        fds[nfd++] = (struct pollfd){.fd = isatty(STDIN_FILENO) ? STDIN_FILENO : -1, .events = POLLIN};
         fds[nfd++] = (struct pollfd){.fd = web.fd, .events = POLLIN};
         if (c.motion >= 0) fds[nfd++] = (struct pollfd){.fd = c.motion, .events = POLLIN};
         if (c.pad >= 0)    fds[nfd++] = (struct pollfd){.fd = c.pad, .events = POLLIN};
@@ -271,7 +286,7 @@ int main(int argc, char **argv)
         poll(fds, (nfds_t)nfd, 20);
 
         char ch;
-        while (read(STDIN_FILENO, &ch, 1) == 1) {
+        while ((fds[0].revents & POLLIN) && read(STDIN_FILENO, &ch, 1) == 1) {
             if (ch == 'q' || ch == 'Q') g_quit = 1;
             else if (ch >= '0' && ch <= '4') ga_app_set_title(&app, SIM_TITLES[ch - '0']);
         }
@@ -281,8 +296,15 @@ int main(int argc, char **argv)
         struct input_event ev;
         int lost = 0;
 
+        /* Leia o touchpad antes dos outros botões para os atalhos não vazarem. */
+        while (c.touch >= 0 && read(c.touch, &ev, sizeof(ev)) == sizeof(ev))
+            if (ev.type == EV_KEY && ev.code == BTN_LEFT)
+                set_bit(&in.buttons, GA_BTN_TOUCHPAD, ev.value != 0);
+        int block = app.cfg.hotkeys_enabled && (in.buttons & GA_BIT(GA_HOTKEY_MODIFIER));
+        vpad_hotkeys(&vp, block);
+
         while (c.pad >= 0 && read(c.pad, &ev, sizeof(ev)) == sizeof(ev)) {
-            vpad_forward(&vp, &ev, (in.buttons & GA_BIT(GA_HOTKEY_MODIFIER)) != 0);
+            vpad_forward(&vp, &ev, block);
             if (ev.type == EV_KEY) {
                 set_bit(&in.buttons, key_to_button(ev.code), ev.value != 0);
             } else if (ev.type == EV_ABS) {
@@ -301,10 +323,6 @@ int main(int argc, char **argv)
         }
         if (c.pad >= 0 && errno == ENODEV) lost = 1;
 
-        while (c.touch >= 0 && read(c.touch, &ev, sizeof(ev)) == sizeof(ev))
-            if (ev.type == EV_KEY && ev.code == BTN_LEFT)
-                set_bit(&in.buttons, GA_BTN_TOUCHPAD, ev.value != 0);
-
         int got_frame = 0;
         while (c.motion >= 0 && read(c.motion, &ev, sizeof(ev)) == sizeof(ev)) {
             if (ev.type == EV_ABS && ev.code >= ABS_RX && ev.code <= ABS_RZ)
@@ -321,19 +339,26 @@ int main(int argc, char **argv)
             memset(&in, 0, sizeof(in));
             memset(gyro, 0, sizeof(gyro));
         }
+        if (got_frame) last_motion = now_s();
+        int fresh = c.motion >= 0 && now_s() - last_motion < .15;
+        ga_app_set_connection(&app, fresh, vp.fd >= 0);
 
         /* Sem controle, ainda roda o núcleo para a página refletir o estado. */
-        if (got_frame || c.motion < 0) {
+        if (got_frame || !fresh) {
             double now = now_s();
             in.dt = (float)(now - last_frame);
             last_frame = now;
-            in.pitch_dps = gyro[0];
-            in.yaw_dps = gyro[1];
+            in.pitch_dps = fresh ? gyro[0] : 0;
+            in.yaw_dps = fresh ? gyro[1] : 0;
             ga_app_process(&app, &in);
             if (c.motion >= 0) vpad_right_stick(&vp, app.out.rx, app.out.ry);
         }
 
-        if (t - last_draw > 1.0 / 15) {
+        if (!terminal_output && strcmp(previous_status, g_vstatus)) {
+            fprintf(stderr, "Controle virtual: %s\n", g_vstatus);
+            snprintf(previous_status, sizeof(previous_status), "%s", g_vstatus);
+        }
+        if (terminal_output && t - last_draw > 1.0 / 15) {
             last_draw = t;
             draw(&app, &c, port);
         }

@@ -1,185 +1,264 @@
 #include "webui.h"
-
+#include "profile.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
+static double now_s(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+static void drop(ga_http_client *c)
+{
+    if (c->fd >= 0) close(c->fd);
+    c->fd = -1;
+}
 int ga_webui_start(ga_webui *w, int port)
 {
-    w->fd = -1;
-    w->port = port;
-
+    memset(w, 0, sizeof(*w));
+    w->fd = -1; w->port = port;
+    for (int i = 0; i < GA_HTTP_CLIENTS; i++) w->clients[i].fd = -1;
+    if (port < 1 || port > 65535) return -EINVAL;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -errno;
-
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
+    struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_port = htons((unsigned short)port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(fd, 8) < 0) {
-        int e = errno;
-        close(fd);
-        return -e;
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(fd, 8) ||
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) < 0) {
+        int e = errno; close(fd); return -e;
     }
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     w->fd = fd;
     return 0;
 }
-
 void ga_webui_stop(ga_webui *w)
 {
     if (w->fd >= 0) close(w->fd);
     w->fd = -1;
+    for (int i = 0; i < GA_HTTP_CLIENTS; i++) drop(&w->clients[i]);
 }
-
-static void send_all(int fd, const char *data, size_t len)
+static void respond(ga_http_client *c, int code, const char *type, const char *body, size_t len)
 {
-    while (len > 0) {
-        ssize_t n = send(fd, data, len, MSG_NOSIGNAL);
-        if (n <= 0) return;
-        data += n;
-        len -= (size_t)n;
-    }
+    int n = snprintf(c->response, sizeof(c->response),
+        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+        "X-Frame-Options: SAMEORIGIN\r\nConnection: close\r\n\r\n",
+        code, code == 200 ? "OK" : code == 409 ? "Conflict" :
+        code == 503 ? "Service Unavailable" : code == 404 ? "Not Found" : "Bad Request", type, len);
+    if (n < 0 || len > sizeof(c->response) - (size_t)n) { drop(c); return; }
+    memcpy(c->response + n, body, len);
+    c->length = (size_t)n + len;
 }
-
-static void respond(int fd, int code, const char *type, const char *body, size_t len)
+static void error(ga_http_client *c, int code, const char *msg)
 {
-    char hdr[256];
-    int n = snprintf(hdr, sizeof(hdr),
-                     "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-                     "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
-                     code, code == 200 ? "OK" : code == 404 ? "Not Found" : "Bad Request",
-                     type, len);
-    send_all(fd, hdr, (size_t)n);
-    send_all(fd, body, len);
+    /* Mensagens constantes, sem dados do cliente. */
+    char json[512];
+    snprintf(json, sizeof(json), "{\"error\":\"%s\"}", msg);
+    respond(c, code, "application/json; charset=utf-8", json, strlen(json));
 }
-
-static void url_decode(char *s)
+static int decode(char *s)
 {
     char *o = s;
     for (; *s; s++) {
-        if (*s == '+') {
-            *o++ = ' ';
-        } else if (*s == '%' && isxdigit((unsigned char)s[1]) && isxdigit((unsigned char)s[2])) {
-            char hex[3] = {s[1], s[2], 0};
-            *o++ = (char)strtol(hex, NULL, 16);
-            s += 2;
-        } else {
-            *o++ = *s;
-        }
+        if (*s == '+') *o++ = ' ';
+        else if (*s == '%') {
+            if (!s[1] || !s[2] || !isxdigit((unsigned char)s[1]) || !isxdigit((unsigned char)s[2])) return -1;
+            char h[3] = {s[1], s[2], 0};
+            unsigned char v = (unsigned char)strtoul(h, NULL, 16);
+            if (!v || v < 32 || v == 127) return -1;
+            *o++ = (char)v; s += 2;
+        } else *o++ = *s;
     }
-    *o = '\0';
-}
-
-/* Chama fn(key, value) para cada par de "a=1&b=2". */
-static int for_each_param(char *body, ga_app *app,
-                          int (*fn)(ga_app *, const char *, const char *))
-{
-    int errors = 0;
-    for (char *save = NULL, *tok = strtok_r(body, "&", &save); tok;
-         tok = strtok_r(NULL, "&", &save)) {
-        char *eq = strchr(tok, '=');
-        if (!eq) { errors++; continue; }
-        *eq = '\0';
-        url_decode(tok);
-        url_decode(eq + 1);
-        if (fn(app, tok, eq + 1) != 0) errors++;
-    }
-    return errors;
-}
-
-static int set_title_param(ga_app *app, const char *key, const char *value)
-{
-    if (strcmp(key, "title") != 0) return -1;
-    ga_app_set_title(app, value);
+    *o = 0;
     return 0;
 }
-
-static void handle(int fd, ga_app *app)
+/* Cabeçalhos já delimitados; rejeita duplicatas, inclusive Content-Length. */
+static int header(const char *headers, const char *name, char *dst, size_t size)
 {
-    struct timeval tv = {0, 300000};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    char req[8192];
-    size_t got = 0;
-    char *body = NULL;
-    size_t content_len = 0;
-
-    /* lê cabeçalho + corpo (pequeno) */
-    while (got < sizeof(req) - 1) {
-        ssize_t n = recv(fd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0) break;
-        got += (size_t)n;
-        req[got] = '\0';
-        if (!body) {
-            char *end = strstr(req, "\r\n\r\n");
-            if (!end) continue;
-            body = end + 4;
-            char *cl = strcasestr(req, "\r\nContent-Length:");
-            if (cl) content_len = strtoul(cl + 17, NULL, 10);
+    int found = 0;
+    size_t len = strlen(name);
+    for (const char *p = headers; *p;) {
+        const char *end = strstr(p, "\r\n");
+        if (!end) end = p + strlen(p);
+        if ((size_t)(end - p) > len && !strncasecmp(p, name, len) && p[len] == ':') {
+            if (found++) return -1;
+            const char *v = p + len + 1;
+            while (v < end && (*v == ' ' || *v == '\t')) v++;
+            while (end > v && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            if ((size_t)(end - v) >= size) return -1;
+            memcpy(dst, v, (size_t)(end - v)); dst[end - v] = 0;
         }
-        if (body && (size_t)(req + got - body) >= content_len) break;
+        p = strstr(p, "\r\n");
+        if (!p) break;
+        p += 2;
     }
-    req[got] = '\0';
-    if (!body) return;
-    if (content_len < sizeof(req) && body + content_len <= req + got)
-        body[content_len] = '\0';
-
-    char method[8] = "", path[128] = "";
-    sscanf(req, "%7s %127s", method, path);
-
-    static char json[8192];
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/") == 0) {
-        respond(fd, 200, "text/html; charset=utf-8", GA_WEBUI_PAGE, strlen(GA_WEBUI_PAGE));
-        return;
-    }
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/api/state") == 0) {
-        size_t n = ga_app_state_json(app, json, sizeof(json));
-        respond(fd, 200, "application/json", json, n);
-        return;
-    }
-    if (strcmp(method, "POST") == 0) {
-        int err = -1;
-        if (strcmp(path, "/api/set") == 0)
-            err = for_each_param(body, app, ga_app_set);
-        else if (strcmp(path, "/api/title") == 0 && app->simulated)
-            err = for_each_param(body, app, set_title_param);
-        else if (strcmp(path, "/api/save_default") == 0)
-            err = ga_app_save_as_default(app);
-
-        if (err == 0) {
-            size_t n = ga_app_state_json(app, json, sizeof(json));
-            respond(fd, 200, "application/json", json, n);
-        } else {
-            respond(fd, 400, "text/plain", "erro", 4);
-        }
-        return;
-    }
-    respond(fd, 404, "text/plain", "nao encontrado", 14);
+    return found;
 }
 
-void ga_webui_poll(ga_webui *w, ga_app *app)
+typedef struct { char *key, *value; } param;
+static int params(char *body, param *ps, int max)
+{
+    int n = 0;
+    if (!*body) return 0;
+    while (body && *body) {
+        char *next = strchr(body, '&');
+        if (next) *next++ = 0;
+        char *eq = strchr(body, '=');
+        if (!eq || n == max) return -1;
+        *eq++ = 0;
+        if (decode(body) || decode(eq) || !*body) return -1;
+        for (int i = 0; i < n; i++) if (!strcmp(ps[i].key, body)) return -1;
+        ps[n++] = (param){body, eq};
+        body = next;
+    }
+    return n;
+}
+static char *value(param *ps, int n, const char *key)
+{
+    for (int i = 0; i < n; i++) if (!strcmp(ps[i].key, key)) return ps[i].value;
+    return NULL;
+}
+static void handle(ga_http_client *c, ga_app *a, char *body)
+{
+    char method[8], path[128], version[16], json[8192];
+    if (sscanf(c->request, "%7s %127s %15s", method, path, version) != 3 || strcmp(version, "HTTP/1.1")) {
+        error(c, 400, "Requisição inválida."); return;
+    }
+    if (!strcmp(method, "GET")) {
+        if (!strcmp(path, "/") || !strcmp(path, "/compact"))
+            respond(c, 200, "text/html; charset=utf-8", GA_WEBUI_PAGE, strlen(GA_WEBUI_PAGE));
+        else if (!strcmp(path, "/practice"))
+            respond(c, 200, "text/html; charset=utf-8", GA_PRACTICE_PAGE, strlen(GA_PRACTICE_PAGE));
+        else if (!strcmp(path, "/api/state")) {
+            size_t n = ga_app_state_json(a, json, sizeof(json));
+            respond(c, 200, "application/json; charset=utf-8", json, n);
+        } else error(c, 404, "Página não encontrada.");
+        return;
+    }
+    if (strcmp(method, "POST")) { error(c, 400, "Método inválido."); return; }
+    char guard[16], origin[256], host[256], type[128];
+    int o = header(c->request, "Origin", origin, sizeof(origin));
+    int h = header(c->request, "Host", host, sizeof(host));
+    char expected[280]; snprintf(expected, sizeof(expected), "http://%s", h == 1 ? host : "");
+    if (header(c->request, "X-GyroAim", guard, sizeof(guard)) != 1 || strcmp(guard, "1") ||
+        header(c->request, "Content-Type", type, sizeof(type)) != 1 ||
+        strcmp(type, "application/x-www-form-urlencoded") || h != 1 || o < 0 ||
+        (o == 1 && strcmp(origin, expected))) {
+        error(c, 400, "Origem ou formato inválido. Use o painel deste endereço."); return;
+    }
+    param ps[24]; int n = params(body, ps, 24);
+    if (n < 0) { error(c, 400, "Parâmetros inválidos ou repetidos."); return; }
+    char *title = value(ps, n, "title"), *revision = value(ps, n, "revision"), *end = NULL;
+    unsigned long rev = revision ? strtoul(revision, &end, 10) : 0;
+    if (!title || !revision || !*revision || *end || strcmp(title, a->title) || rev != a->revision) {
+        error(c, 409, "O jogo ou os ajustes mudaram. Confira o perfil e tente novamente."); return;
+    }
+    int r = -1;
+    if (!strcmp(path, "/api/set")) {
+        ga_config next = a->cfg; int count = 0; r = 0;
+        for (int i = 0; i < n; i++) {
+            if (!strcmp(ps[i].key, "title") || !strcmp(ps[i].key, "revision")) continue;
+            count++;
+            if (ga_config_set(&next, ps[i].key, ps[i].value)) r = -1;
+        }
+        if (!r) r = count ? ga_app_commit(a, &next) : -1;
+    } else if (!strcmp(path, "/api/action") && n == 3) {
+        char *action = value(ps, n, "action");
+        if (action) r = ga_app_action(a, action);
+    } else if (!strcmp(path, "/api/save_default") && n == 2) r = ga_app_save_as_default(a);
+    else if (!strcmp(path, "/api/title") && a->simulated && n >= 3 && n <= 5) {
+        char *next_title = value(ps, n, "next_title"), safe[64];
+        ga_title_sanitize(next_title, safe, sizeof(safe));
+        char *name = value(ps, n, "next_name"), *source = value(ps, n, "source");
+        if (!name) name = "";
+        if (!source) source = "manual";
+        int known = 0;
+        for (int i = 0; i < n; i++)
+            if (!strcmp(ps[i].key, "title") || !strcmp(ps[i].key, "revision") ||
+                !strcmp(ps[i].key, "next_title") || !strcmp(ps[i].key, "next_name") ||
+                !strcmp(ps[i].key, "source")) known++;
+        if (next_title && !strcmp(next_title, safe) && known == n &&
+            (!strcmp(source, "manual") || !strcmp(source, "discovery") || !strcmp(source, "ps5_panel"))) {
+            ga_app_set_title(a, safe);
+            size_t length = strlen(name);
+            if (length >= sizeof(a->title_name)) {
+                length = sizeof(a->title_name) - 1;
+                while (length && ((unsigned char)name[length] & 0xc0) == 0x80) length--;
+            }
+            memcpy(a->title_name, name, length); a->title_name[length] = 0;
+            snprintf(a->title_source, sizeof(a->title_source), "%s", source);
+            a->revision++;
+            r = 0;
+        }
+    }
+    if (r) error(c, r == -2 ? 503 : 400, r == -2 ? "Falha ao salvar. Ajuste anterior mantido." : "Ação ou valor inválido.");
+    else {
+        size_t len = ga_app_state_json(a, json, sizeof(json));
+        respond(c, 200, "application/json; charset=utf-8", json, len);
+    }
+}
+/* Retorna sem esperar o cliente: uma conexão lenta não paralisa a mira. */
+static void read_request(ga_http_client *c, ga_app *a)
+{
+    ssize_t n = recv(c->fd, c->request + c->used, sizeof(c->request) - 1 - c->used, 0);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { drop(c); return; }
+    if (n > 0) c->used += (size_t)n;
+    c->request[c->used] = 0;
+    char *body = strstr(c->request, "\r\n\r\n");
+    if (!body) {
+        if (c->used == sizeof(c->request) - 1) error(c, 400, "Cabeçalho muito grande.");
+        return;
+    }
+    *body = 0; body += 4;
+    char length[32] = "", transfer[32];
+    int found = header(c->request, "Content-Length", length, sizeof(length));
+    char *end; unsigned long len = strtoul(length, &end, 10);
+    size_t offset = (size_t)(body - c->request);
+    if (found < 0 || (found && (!*length || *end || length[0] == '-')) ||
+        header(c->request, "Transfer-Encoding", transfer, sizeof(transfer)) != 0 ||
+        len >= sizeof(c->request) - offset || memchr(body, 0, c->used - offset)) {
+        error(c, 400, "Tamanho ou corpo inválido."); return;
+    }
+    if (c->used - offset < len) { body[-4] = '\r'; return; }
+    if (c->used - offset != len) { error(c, 400, "Corpo inesperado."); return; }
+    handle(c, a, body);
+}
+void ga_webui_poll(ga_webui *w, ga_app *a)
 {
     if (w->fd < 0) return;
-    for (int i = 0; i < 8; i++) {
-        int c = accept(w->fd, NULL, NULL);
-        if (c < 0) return;
-        /* a conexão aceita herda O_NONBLOCK em alguns sistemas (BSD/PS5) */
-        fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) & ~O_NONBLOCK);
-        handle(c, app);
-        close(c);
+    double now = now_s();
+    for (int i = 0; i < GA_HTTP_CLIENTS; i++) {
+        ga_http_client *c = &w->clients[i];
+        if (c->fd < 0) {
+            int fd = accept(w->fd, NULL, NULL);
+            if (fd < 0) continue;
+            if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) < 0) { close(fd); continue; }
+#ifdef SO_NOSIGPIPE
+            int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+            c->fd = fd; c->used = c->length = c->sent = 0; c->started = now;
+        }
+        if (now - c->started > 2) { drop(c); continue; }
+        if (!c->length) read_request(c, a);
+        if (c->fd < 0 || !c->length) continue;
+        ssize_t n = send(c->fd, c->response + c->sent, c->length - c->sent, MSG_NOSIGNAL);
+        if (n > 0) c->sent += (size_t)n;
+        if (c->sent == c->length || n == 0 ||
+            (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) drop(c);
     }
 }
